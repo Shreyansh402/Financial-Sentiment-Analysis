@@ -1,0 +1,922 @@
+import numpy as np # linear algebra
+import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)
+
+# Input data files are available in the read-only "../input/" directory
+# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory
+
+import os
+for dirname, _, filenames in os.walk('/kaggle/input'):
+    for filename in filenames:
+        print(os.path.join(dirname, filename))
+
+# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using "Save & Run All" 
+# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:47.985622Z","iopub.execute_input":"2024-11-25T05:25:47.986400Z","iopub.status.idle":"2024-11-25T05:25:47.996206Z","shell.execute_reply.started":"2024-11-25T05:25:47.986359Z","shell.execute_reply":"2024-11-25T05:25:47.995448Z"},"jupyter":{"outputs_hidden":false}}
+# Import necessary libraries
+import pandas as pd
+import numpy as np
+from collections import Counter
+import matplotlib.pyplot as plt
+import seaborn as sns
+from ast import literal_eval
+from datasets import load_dataset
+from collections import defaultdict
+
+# %% [markdown] {"jupyter":{"outputs_hidden":false}}
+# # 1. Exploratory Data Analysis
+
+# %% [markdown]
+# Dataset Overview
+# The dataset used for this task is derived from the FIQA 2018 dataset, which contains financial domain sentences annotated with aspects and sentiment scores. The primary objective is to predict:
+# 
+# The main aspect of a given sentence.
+# The sentiment score associated with it, along with a sentiment label.
+# 
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:47.997419Z","iopub.execute_input":"2024-11-25T05:25:47.997675Z","iopub.status.idle":"2024-11-25T05:25:48.755976Z","shell.execute_reply.started":"2024-11-25T05:25:47.997650Z","shell.execute_reply":"2024-11-25T05:25:48.755289Z"},"jupyter":{"outputs_hidden":false}}
+# Load the data
+ds = load_dataset("pauri32/fiqa-2018")
+
+
+# Convert each split to DataFrame
+train_df = pd.DataFrame(ds['train'])
+test_df = pd.DataFrame(ds['test'])
+validate_df = pd.DataFrame(ds['validation'])
+
+# Function to check valid 'aspects' strings
+def is_valid_list_string(s):
+    try:
+        literal_eval(s)
+        return True
+    except (SyntaxError, ValueError):
+        return False
+
+# Filter out rows with invalid 'aspects' strings for all splits
+train_df = train_df[train_df['aspects'].apply(is_valid_list_string)]
+
+# Convert string representations of lists to actual lists
+train_df.loc[:, 'aspects'] = train_df['aspects'].apply(literal_eval)
+
+# Extract main aspects (taking the first level of hierarchy)
+train_df['main_aspect'] = train_df['aspects'].apply(lambda x: x[0].split('/')[0])
+
+# Filter out rows with invalid 'aspects' strings for all splits
+test_df = test_df[test_df['aspects'].apply(is_valid_list_string)]
+
+# Convert string representations of lists to actual lists
+test_df.loc[:, 'aspects'] = test_df['aspects'].apply(literal_eval)
+
+# Extract main aspects (taking the first level of hierarchy)
+test_df['main_aspect'] = test_df['aspects'].apply(lambda x: x[0].split('/')[0])
+
+# Filter out rows with invalid 'aspects' strings for all splits
+validate_df = validate_df[validate_df['aspects'].apply(is_valid_list_string)]
+
+# Convert string representations of lists to actual lists
+validate_df.loc[:, 'aspects'] = validate_df['aspects'].apply(literal_eval)
+
+# Extract main aspects (taking the first level of hierarchy)
+validate_df['main_aspect'] = validate_df['aspects'].apply(lambda x: x[0].split('/')[0])
+
+# Concatenate for consistent label encoding
+combined_df = pd.concat([train_df, test_df, validate_df])
+
+# Create label encoder for aspects
+aspect_encoder = LabelEncoder()
+combined_df['aspect_encoded'] = aspect_encoder.fit_transform(combined_df['main_aspect'])
+
+# Update the splits with the encoded aspects
+train_df['aspect_encoded'] = aspect_encoder.transform(train_df['main_aspect'])
+test_df['aspect_encoded'] = aspect_encoder.transform(test_df['main_aspect'])
+validate_df['aspect_encoded'] = aspect_encoder.transform(validate_df['main_aspect'])
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:48.757653Z","iopub.execute_input":"2024-11-25T05:25:48.757937Z","iopub.status.idle":"2024-11-25T05:25:48.770154Z","shell.execute_reply.started":"2024-11-25T05:25:48.757908Z","shell.execute_reply":"2024-11-25T05:25:48.769296Z"},"jupyter":{"outputs_hidden":false}}
+# df = pd.DataFrame(ds['train'])
+combined_df.head()
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:48.771295Z","iopub.execute_input":"2024-11-25T05:25:48.771567Z","iopub.status.idle":"2024-11-25T05:25:48.782466Z","shell.execute_reply.started":"2024-11-25T05:25:48.771540Z","shell.execute_reply":"2024-11-25T05:25:48.781681Z"},"jupyter":{"outputs_hidden":false}}
+def count_aspects(aspect_lists):
+    # Create nested defaultdict to store hierarchical counts
+    hierarchy = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(int))))
+    
+    # Count for all levels
+    level_counts = {
+        'level1': defaultdict(int),  # e.g., Stock
+        'level2': defaultdict(int),  # e.g., Stock/Price Action
+        'level3': defaultdict(int),  # e.g., Stock/Price Action/Bullish
+        'level4': defaultdict(int)   # e.g., Stock/Price Action/Bullish/Bullish Behavior
+    }
+    
+    for aspect_list in aspect_lists:
+        for aspect in aspect_list:
+            parts = aspect.split('/')
+            
+            # Count each level
+            for i in range(len(parts)):
+                current_path = '/'.join(parts[:i+1])
+                if i == 0:
+                    level_counts['level1'][parts[0]] += 1
+                elif i == 1:
+                    level_counts['level2'][current_path] += 1
+                elif i == 2:
+                    level_counts['level3'][current_path] += 1
+                elif i == 3:
+                    level_counts['level4'][current_path] += 1
+    
+    return level_counts
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:48.783456Z","iopub.execute_input":"2024-11-25T05:25:48.783820Z","iopub.status.idle":"2024-11-25T05:25:50.781436Z","shell.execute_reply.started":"2024-11-25T05:25:48.783790Z","shell.execute_reply":"2024-11-25T05:25:50.780563Z"},"jupyter":{"outputs_hidden":false}}
+# Get hierarchical counts
+aspect_hierarchy = count_aspects(combined_df['aspects'])
+
+# Plot subcategories for each main category
+plt.figure(figsize=(20, 5*len(aspect_hierarchy)))
+plot_idx = 1
+
+for main_category, subcategories in aspect_hierarchy.items():
+    plt.subplot(len(aspect_hierarchy), 1, plot_idx)
+    
+    # Sort subcategories by count
+    sorted_subcats = dict(sorted(subcategories.items(), key=lambda x: x[1], reverse=True))
+    
+    plt.bar(sorted_subcats.keys(), sorted_subcats.values())
+    plt.title(f'Subcategories Distribution for {main_category}')
+    plt.xticks(rotation=45, ha='right')
+    plt.xlabel('Subcategory')
+    plt.ylabel('Count')
+    plt.tight_layout()
+    plot_idx += 1
+
+plt.show()
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:50.782618Z","iopub.execute_input":"2024-11-25T05:25:50.782889Z","iopub.status.idle":"2024-11-25T05:25:50.788046Z","shell.execute_reply.started":"2024-11-25T05:25:50.782861Z","shell.execute_reply":"2024-11-25T05:25:50.787127Z"},"jupyter":{"outputs_hidden":false}}
+# Function to count hierarchical aspects
+def count_hierarchical_aspects(aspect_lists):
+    hierarchy = defaultdict(lambda: defaultdict(int))
+    
+    for aspect_list in aspect_lists:
+        for aspect in aspect_list:
+            parts = aspect.split('/')
+            main_category = parts[0]
+            sub_category = parts[1] if len(parts) > 1 else 'Other'
+            hierarchy[main_category][sub_category] += 1
+    
+    return hierarchy
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:50.791050Z","iopub.execute_input":"2024-11-25T05:25:50.791476Z","iopub.status.idle":"2024-11-25T05:25:51.829657Z","shell.execute_reply.started":"2024-11-25T05:25:50.791440Z","shell.execute_reply":"2024-11-25T05:25:51.828739Z"},"jupyter":{"outputs_hidden":false}}
+# Get hierarchical counts
+aspect_hierarchy = count_hierarchical_aspects(combined_df['aspects'])
+
+# Plot subcategories for each main category
+plt.figure(figsize=(20, 5*len(aspect_hierarchy)))
+plot_idx = 1
+
+for main_category, subcategories in aspect_hierarchy.items():
+    plt.subplot(len(aspect_hierarchy), 1, plot_idx)
+    
+    # Sort subcategories by count
+    sorted_subcats = dict(sorted(subcategories.items(), key=lambda x: x[1], reverse=True))
+    
+    plt.bar(sorted_subcats.keys(), sorted_subcats.values())
+    plt.title(f'Subcategories Distribution for {main_category}')
+    plt.xticks(rotation=45, ha='right')
+    plt.xlabel('Subcategory')
+    plt.ylabel('Count')
+    plt.tight_layout()
+    plot_idx += 1
+
+plt.show()
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:51.830988Z","iopub.execute_input":"2024-11-25T05:25:51.831405Z","iopub.status.idle":"2024-11-25T05:25:51.841483Z","shell.execute_reply.started":"2024-11-25T05:25:51.831360Z","shell.execute_reply":"2024-11-25T05:25:51.840502Z"},"jupyter":{"outputs_hidden":false}}
+# Analyze sentiment distribution
+print("\nSentiment Score Statistics:")
+print(combined_df['sentiment_score'].describe())
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:51.842804Z","iopub.execute_input":"2024-11-25T05:25:51.843097Z","iopub.status.idle":"2024-11-25T05:25:52.104406Z","shell.execute_reply.started":"2024-11-25T05:25:51.843069Z","shell.execute_reply":"2024-11-25T05:25:52.103337Z"},"jupyter":{"outputs_hidden":false}}
+# Analyze sentiment labels
+plt.figure(figsize=(10, 6))
+label_counts = combined_df['label'].value_counts().sort_index()
+plt.bar(label_counts.index, label_counts.values)
+plt.title('Distribution of Sentiment Labels')
+plt.xlabel('Label')
+plt.ylabel('Count')
+plt.show()
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:52.105858Z","iopub.execute_input":"2024-11-25T05:25:52.106546Z","iopub.status.idle":"2024-11-25T05:25:52.368578Z","shell.execute_reply.started":"2024-11-25T05:25:52.106500Z","shell.execute_reply":"2024-11-25T05:25:52.367697Z"},"jupyter":{"outputs_hidden":false}}
+# Create box plot to show sentiment score distribution for each label
+plt.figure(figsize=(12, 6))
+sns.boxplot(x='label', y='sentiment_score', data=combined_df)
+plt.title('Sentiment Scores Distribution by Label')
+plt.xlabel('Label')
+plt.ylabel('Sentiment Score')
+plt.show()
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:52.369645Z","iopub.execute_input":"2024-11-25T05:25:52.369909Z","iopub.status.idle":"2024-11-25T05:25:52.657286Z","shell.execute_reply.started":"2024-11-25T05:25:52.369882Z","shell.execute_reply":"2024-11-25T05:25:52.656416Z"},"jupyter":{"outputs_hidden":false}}
+# Create violin plot for more detailed distribution
+plt.figure(figsize=(12, 6))
+sns.violinplot(x='label', y='sentiment_score', data=combined_df)
+plt.title('Detailed Sentiment Scores Distribution by Label')
+plt.xlabel('Label')
+plt.ylabel('Sentiment Score')
+plt.show()
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:52.658713Z","iopub.execute_input":"2024-11-25T05:25:52.659086Z","iopub.status.idle":"2024-11-25T05:25:52.670925Z","shell.execute_reply.started":"2024-11-25T05:25:52.659045Z","shell.execute_reply":"2024-11-25T05:25:52.669939Z"},"jupyter":{"outputs_hidden":false}}
+# Calculate summary statistics for each label
+print("\nSentiment Score Statistics by Label:")
+print("-" * 40)
+for label in sorted(combined_df['label'].unique()):
+    scores = combined_df[combined_df['label'] == label]['sentiment_score']
+    print(f"\nLabel {label}:")
+    print(f"Min: {scores.min():.3f}")
+    print(f"Max: {scores.max():.3f}")
+    print(f"Mean: {scores.mean():.3f}")
+    print(f"Median: {scores.median():.3f}")
+    print(f"Std Dev: {scores.std():.3f}")
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:52.672123Z","iopub.execute_input":"2024-11-25T05:25:52.672412Z","iopub.status.idle":"2024-11-25T05:25:52.903866Z","shell.execute_reply.started":"2024-11-25T05:25:52.672384Z","shell.execute_reply":"2024-11-25T05:25:52.902868Z"},"jupyter":{"outputs_hidden":false}}
+# Analyze sentiment score distribution wrt format
+figsize = (12, 1.2 * len(combined_df['format'].unique()))
+plt.figure(figsize=figsize)
+sns.violinplot(combined_df, x='sentiment_score', y='format', inner='box', palette='Dark2')
+sns.despine(top=True, right=True, bottom=True, left=True)
+
+# %% [markdown] {"jupyter":{"outputs_hidden":false}}
+# # 2. Model Training
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:52.905234Z","iopub.execute_input":"2024-11-25T05:25:52.905872Z","iopub.status.idle":"2024-11-25T05:25:52.910723Z","shell.execute_reply.started":"2024-11-25T05:25:52.905830Z","shell.execute_reply":"2024-11-25T05:25:52.909715Z"},"jupyter":{"outputs_hidden":false}}
+import torch
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AdamW
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+from tqdm import tqdm
+from sklearn.preprocessing import LabelEncoder
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:52.911999Z","iopub.execute_input":"2024-11-25T05:25:52.912682Z","iopub.status.idle":"2024-11-25T05:25:52.923733Z","shell.execute_reply.started":"2024-11-25T05:25:52.912643Z","shell.execute_reply":"2024-11-25T05:25:52.922863Z"},"jupyter":{"outputs_hidden":false}}
+# Custom dataset class
+class FinancialDataset(Dataset):
+    def _init_(self, texts, aspects, sentiments, tokenizer, max_length=128):
+        self.texts = texts
+        self.aspects = aspects
+        self.sentiments = sentiments
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def _len_(self):
+        return len(self.texts)
+
+    def _getitem_(self, idx):
+        text = str(self.texts[idx])
+        
+        encoding = self.tokenizer(
+            text,
+            add_special_tokens=True,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].flatten(),
+            'attention_mask': encoding['attention_mask'].flatten(),
+            'aspect_label': torch.tensor(self.aspects[idx], dtype=torch.long),
+            'sentiment_label': torch.tensor(self.sentiments[idx], dtype=torch.long)
+        }
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:52.924825Z","iopub.execute_input":"2024-11-25T05:25:52.925074Z","iopub.status.idle":"2024-11-25T05:25:54.618387Z","shell.execute_reply.started":"2024-11-25T05:25:52.925049Z","shell.execute_reply":"2024-11-25T05:25:54.617398Z"},"jupyter":{"outputs_hidden":false}}
+# Initialize FinBERT tokenizer and model
+tokenizer = AutoTokenizer.from_pretrained('ProsusAI/finbert')
+model = AutoModelForSequenceClassification.from_pretrained(
+    'ProsusAI/finbert',
+    num_labels=num_aspects,  # Set to number of aspects
+    problem_type="single_label_classification",
+    ignore_mismatched_sizes=True 
+)
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:54.620104Z","iopub.execute_input":"2024-11-25T05:25:54.620542Z","iopub.status.idle":"2024-11-25T05:25:54.627096Z","shell.execute_reply.started":"2024-11-25T05:25:54.620496Z","shell.execute_reply":"2024-11-25T05:25:54.626093Z"},"jupyter":{"outputs_hidden":false}}
+# Prepare datasets for training, validation, and testing
+train_dataset = FinancialDataset(
+    train_df['sentence'].values,
+    train_df['aspect_encoded'].values,
+    train_df['label'].values,
+    tokenizer
+)
+
+validate_dataset = FinancialDataset(
+    validate_df['sentence'].values,
+    validate_df['aspect_encoded'].values,
+    validate_df['label'].values,
+    tokenizer
+)
+
+test_dataset = FinancialDataset(
+    test_df['sentence'].values,
+    test_df['aspect_encoded'].values,
+    test_df['label'].values,
+    tokenizer
+)
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:54.628697Z","iopub.execute_input":"2024-11-25T05:25:54.628932Z","iopub.status.idle":"2024-11-25T05:25:54.640026Z","shell.execute_reply.started":"2024-11-25T05:25:54.628908Z","shell.execute_reply":"2024-11-25T05:25:54.639393Z"},"jupyter":{"outputs_hidden":false}}
+# Create DataLoader instances
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+validate_loader = DataLoader(validate_dataset, batch_size=16)
+test_loader = DataLoader(test_dataset, batch_size=16)
+
+# %% [markdown]
+# Aspect Prediction Model:
+# Chose FinBERT, a transformer model pre-trained on financial text, as the base model for aspect classification.
+# The model predicts the main aspect category for each sentence.
+# The reason for using FinBERT is its domain-specific pretraining, which allows it to effectively understand financial context compared to a generic language model like BERT.
+# Fine-tuned the model on our dataset to adapt it to the specific task.
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:54.644530Z","iopub.execute_input":"2024-11-25T05:25:54.644799Z","iopub.status.idle":"2024-11-25T05:25:54.660023Z","shell.execute_reply.started":"2024-11-25T05:25:54.644772Z","shell.execute_reply":"2024-11-25T05:25:54.659115Z"},"jupyter":{"outputs_hidden":false}}
+# Training function
+def train_model(model, train_loader, test_loader, epochs=5):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    model.to(device)
+    
+    optimizer = AdamW(model.parameters(), lr=2e-5)
+    
+    # Training loop
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}')
+        
+        for batch in progress_bar:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            aspect_labels = batch['aspect_label'].to(device)
+            
+            optimizer.zero_grad()
+            
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=aspect_labels
+            )
+            
+            loss = outputs.loss
+            total_loss += loss.item()
+            
+            loss.backward()
+            optimizer.step()
+            
+            progress_bar.set_postfix({'loss': total_loss / len(train_loader)})
+        
+        print(f"\nEpoch {epoch + 1} average loss: {total_loss / len(train_loader)}")
+        
+        # Evaluation after each epoch
+        evaluate_model(model, test_loader, device)
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:54.661169Z","iopub.execute_input":"2024-11-25T05:25:54.661578Z","iopub.status.idle":"2024-11-25T05:25:54.672722Z","shell.execute_reply.started":"2024-11-25T05:25:54.661536Z","shell.execute_reply":"2024-11-25T05:25:54.671762Z"},"jupyter":{"outputs_hidden":false}}
+# Evaluation function
+def evaluate_model(model, test_loader, device):
+    model.eval()
+    aspect_predictions = []
+    aspect_true = []
+    
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            aspect_labels = batch['aspect_label'].to(device)
+            
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+            
+            _, predicted = torch.max(outputs.logits, 1)
+            
+            aspect_predictions.extend(predicted.cpu().numpy())
+            aspect_true.extend(aspect_labels.cpu().numpy())
+    # Print classification report
+    print("\nClassification Report:")
+    print(classification_report(
+        aspect_true, 
+        aspect_predictions,
+        target_names=aspect_encoder.classes_
+    ))
+    
+    # Plot confusion matrix
+    plt.figure(figsize=(12, 8))
+    cm = confusion_matrix(aspect_true, aspect_predictions)
+    sns.heatmap(
+        cm, 
+        annot=True, 
+        fmt='d',
+        xticklabels=aspect_encoder.classes_,
+        yticklabels=aspect_encoder.classes_
+    )
+    plt.title('Confusion Matrix')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+
+# %% [code] {"execution":{"iopub.status.busy":"2024-11-25T05:25:54.673838Z","iopub.execute_input":"2024-11-25T05:25:54.674202Z","iopub.status.idle":"2024-11-25T05:27:45.906686Z","shell.execute_reply.started":"2024-11-25T05:25:54.674174Z","shell.execute_reply":"2024-11-25T05:27:45.905729Z"},"jupyter":{"outputs_hidden":false}}
+ # Train the model
+print("Starting training...")
+train_model(model, train_loader, test_loader)
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:27:45.908064Z","iopub.execute_input":"2024-11-25T05:27:45.908367Z","iopub.status.idle":"2024-11-25T05:27:45.915498Z","shell.execute_reply.started":"2024-11-25T05:27:45.908338Z","shell.execute_reply":"2024-11-25T05:27:45.914289Z"}}
+# Function for making predictions on new text
+def predict_aspect_and_sentiment(text, model, tokenizer):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()
+    
+    # Tokenize input text
+    encoding = tokenizer(
+        text,
+        add_special_tokens=True,
+        max_length=128,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt'
+    )
+    
+    # Move inputs to device
+    input_ids = encoding['input_ids'].to(device)
+    attention_mask = encoding['attention_mask'].to(device)
+    
+    # Get predictions
+    with torch.no_grad():
+        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        aspect_pred = torch.argmax(outputs.logits, dim=1)
+    
+    # Convert predictions to labels
+    predicted_aspect = aspect_encoder.inverse_transform(aspect_pred.cpu().numpy())[0]
+    
+    return predicted_aspect
+
+# %% [markdown]
+# Sentiment Prediction Model:
+# Used the same tokenizer and pre-trained embeddings (from FinBERT) to initialize the sentiment model.
+# Added additional layers for regression to predict the sentiment score and classification to predict sentiment labels.
+# Leveraged the predicted aspect as an additional feature to guide the sentiment prediction.
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:27:45.916612Z","iopub.execute_input":"2024-11-25T05:27:45.916880Z","iopub.status.idle":"2024-11-25T05:27:45.932273Z","shell.execute_reply.started":"2024-11-25T05:27:45.916832Z","shell.execute_reply":"2024-11-25T05:27:45.931271Z"}}
+class SentimentDataset(Dataset):
+    def _init_(self, texts, aspects, sentiments, tokenizer, max_length=128):
+        self.texts = texts
+        self.aspects = aspects
+        self.sentiments = sentiments
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def _len_(self):
+        return len(self.texts)
+
+    def _getitem_(self, idx):
+        text = str(self.texts[idx])
+        aspect = str(self.aspects[idx])
+
+        # Combine text and aspect
+        combined_input = f"{text} [ASPECT] {aspect}"
+
+        encoding = self.tokenizer(
+            combined_input,
+            add_special_tokens=True,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+
+        return {
+            'input_ids': encoding['input_ids'].flatten(),
+            'attention_mask': encoding['attention_mask'].flatten(),
+            'sentiment_label': torch.tensor(self.sentiments[idx], dtype=torch.float)
+        }
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:27:45.933456Z","iopub.execute_input":"2024-11-25T05:27:45.933810Z","iopub.status.idle":"2024-11-25T05:27:45.949456Z","shell.execute_reply.started":"2024-11-25T05:27:45.933769Z","shell.execute_reply":"2024-11-25T05:27:45.948633Z"}}
+# Create datasets for the sentiment model
+sentiment_train_dataset = SentimentDataset(
+    train_df['sentence'].values,
+    train_df['aspect_encoded'].values,
+    train_df['label'].values,
+    tokenizer
+)
+
+sentiment_validate_dataset = SentimentDataset(
+    validate_df['sentence'].values,
+    validate_df['aspect_encoded'].values,
+    validate_df['label'].values,
+    tokenizer
+)
+
+sentiment_test_dataset = SentimentDataset(
+    test_df['sentence'].values,
+    test_df['aspect_encoded'].values,
+    test_df['label'].values,
+    tokenizer
+)
+
+# Create DataLoader instances
+sentiment_train_loader = DataLoader(sentiment_train_dataset, batch_size=16, shuffle=True)
+sentiment_validate_loader = DataLoader(sentiment_validate_dataset, batch_size=16)
+sentiment_test_loader = DataLoader(sentiment_test_dataset, batch_size=16)
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:27:45.950863Z","iopub.execute_input":"2024-11-25T05:27:45.951587Z","iopub.status.idle":"2024-11-25T05:27:46.283992Z","shell.execute_reply.started":"2024-11-25T05:27:45.951543Z","shell.execute_reply":"2024-11-25T05:27:46.283253Z"}}
+# Define the sentiment model
+class SentimentModel(nn.Module):
+    def _init_(self, pretrained_model):
+        super(SentimentModel, self)._init_()
+        self.bert = AutoModel.from_pretrained(pretrained_model)
+        self.regressor = nn.Linear(self.bert.config.hidden_size, 1)
+
+    def forward(self, input_ids, attention_mask):
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+        pooled_output = outputs.pooler_output
+        sentiment_score = self.regressor(pooled_output)
+        return sentiment_score
+
+sentiment_model = SentimentModel('ProsusAI/finbert')
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:27:46.285354Z","iopub.execute_input":"2024-11-25T05:27:46.285702Z","iopub.status.idle":"2024-11-25T05:27:46.292925Z","shell.execute_reply.started":"2024-11-25T05:27:46.285661Z","shell.execute_reply":"2024-11-25T05:27:46.292089Z"}}
+# Define training function for sentiment model
+def train_sentiment_model(model, train_loader, test_loader, epochs=3):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    optimizer = AdamW(model.parameters(), lr=2e-5)
+    criterion = nn.MSELoss()  # Using Mean Squared Error for regression
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}")
+
+        for batch in progress_bar:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            sentiment_labels = batch['sentiment_label'].to(device)
+
+            optimizer.zero_grad()
+            outputs = model(input_ids, attention_mask)
+            loss = criterion(outputs.squeeze(), sentiment_labels)
+            total_loss += loss.item()
+
+            loss.backward()
+            optimizer.step()
+            progress_bar.set_postfix({'loss': total_loss / len(train_loader)})
+
+        print(f"Epoch {epoch + 1} average loss: {total_loss / len(train_loader)}")
+
+        # Evaluation
+        evaluate_sentiment_model(model, test_loader, device)
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:27:46.293911Z","iopub.execute_input":"2024-11-25T05:27:46.294147Z","iopub.status.idle":"2024-11-25T05:27:46.307838Z","shell.execute_reply.started":"2024-11-25T05:27:46.294123Z","shell.execute_reply":"2024-11-25T05:27:46.307269Z"}}
+# Evaluate function for sentiment model
+def evaluate_sentiment_model(model, test_loader, device):
+    model.eval()
+    predictions = []
+    true_labels = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            sentiment_labels = batch['sentiment_label'].to(device)
+
+            outputs = model(input_ids, attention_mask)
+            predictions.extend(outputs.squeeze().cpu().numpy())
+            true_labels.extend(sentiment_labels.cpu().numpy())
+
+    mse = mean_squared_error(true_labels, predictions)
+    print(f"Mean Squared Error: {mse:.4f}")
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:27:46.308830Z","iopub.execute_input":"2024-11-25T05:27:46.309178Z","iopub.status.idle":"2024-11-25T05:29:36.254006Z","shell.execute_reply.started":"2024-11-25T05:27:46.309134Z","shell.execute_reply":"2024-11-25T05:29:36.253111Z"}}
+train_sentiment_model(sentiment_model, sentiment_train_loader, sentiment_test_loader, epochs=5)
+
+# %% [markdown] {"jupyter":{"outputs_hidden":false}}
+# # 3. Model Testing and Inference
+
+# %% [markdown]
+# Pipeline Integration:
+# Combined the aspect prediction model and sentiment prediction model into a single pipeline.
+# First, the aspect prediction model identifies the main aspect for a sentence.
+# The output is passed to the sentiment model to predict both the sentiment score and sentiment label.
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:29:36.256187Z","iopub.execute_input":"2024-11-25T05:29:36.256577Z","iopub.status.idle":"2024-11-25T05:29:36.264923Z","shell.execute_reply.started":"2024-11-25T05:29:36.256536Z","shell.execute_reply":"2024-11-25T05:29:36.264024Z"}}
+def predict_pipeline_with_label(text, aspect_model, sentiment_model, tokenizer):
+    """
+    Pipeline to predict aspect, sentiment score, and label.
+    Label:
+      - 1 if -0.1 <= sentiment_score <= 0.1 (neutral)
+      - 0 if sentiment_score < -0.1 (negative)
+      - 2 if sentiment_score > 0.1 (positive)
+    """
+    # Step 1: Predict the aspect
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    aspect_model.to(device)
+    sentiment_model.to(device)
+
+    aspect_model.eval()
+    sentiment_model.eval()
+
+    # Tokenize input for aspect prediction
+    encoding = tokenizer(
+        text,
+        add_special_tokens=True,
+        max_length=128,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt'
+    )
+
+    input_ids = encoding['input_ids'].to(device)
+    attention_mask = encoding['attention_mask'].to(device)
+
+    with torch.no_grad():
+        aspect_outputs = aspect_model(input_ids=input_ids, attention_mask=attention_mask)
+        predicted_aspect_id = torch.argmax(aspect_outputs.logits, dim=1).item()
+        predicted_aspect = aspect_encoder.inverse_transform([predicted_aspect_id])[0]
+
+    # Step 2: Predict the sentiment score using the aspect
+    combined_input = f"{text} [ASPECT] {predicted_aspect}"
+    sentiment_encoding = tokenizer(
+        combined_input,
+        add_special_tokens=True,
+        max_length=128,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt'
+    )
+
+    sentiment_input_ids = sentiment_encoding['input_ids'].to(device)
+    sentiment_attention_mask = sentiment_encoding['attention_mask'].to(device)
+
+    with torch.no_grad():
+        sentiment_score = sentiment_model(sentiment_input_ids, sentiment_attention_mask).item()
+
+    # Step 3: Determine the label based on the sentiment score
+    if -0.1 <= sentiment_score <= 0.1:
+        label = 1  # Neutral
+    elif sentiment_score < -0.1:
+        label = 0  # Negative
+    else:
+        label = 2  # Positive
+
+    return predicted_aspect, sentiment_score, label
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:29:36.266058Z","iopub.execute_input":"2024-11-25T05:29:36.266348Z","iopub.status.idle":"2024-11-25T05:29:36.367997Z","shell.execute_reply.started":"2024-11-25T05:29:36.266322Z","shell.execute_reply":"2024-11-25T05:29:36.367091Z"}}
+sample_texts = [
+    "Tesla reports record quarterly deliveries",
+    "Barclays Stock shoots up after me joining the company",
+    "Amazon announces new acquisition deal"
+]
+
+
+print("\nPipeline Predictions:")
+for text in sample_texts:
+    aspect, sentiment, label = predict_pipeline_with_label(text, model, sentiment_model, tokenizer)
+    print(f"\nText: {text}")
+    print(f"Predicted Aspect: {aspect}")
+    print(f"Predicted Sentiment Score: {sentiment:.2f}")
+    print(f"Predicted Label: {label} (0=Negative, 1=Neutral, 2=Positive)")
+
+# %% [code] {"jupyter":{"outputs_hidden":false},"execution":{"iopub.status.busy":"2024-11-25T05:29:36.369714Z","iopub.execute_input":"2024-11-25T05:29:36.370091Z","iopub.status.idle":"2024-11-25T05:29:36.378852Z","shell.execute_reply.started":"2024-11-25T05:29:36.370054Z","shell.execute_reply":"2024-11-25T05:29:36.377795Z"}}
+# # %% [code] {"execution":{"iopub.status.busy":"2024-11-25T03:42:07.467770Z","iopub.execute_input":"2024-11-25T03:42:07.468058Z","iopub.status.idle":"2024-11-25T03:42:07.965836Z","shell.execute_reply.started":"2024-11-25T03:42:07.468029Z","shell.execute_reply":"2024-11-25T03:42:07.964896Z"}}
+# from sklearn.metrics import mean_squared_error,r2_score
+
+# class MultitaskFinancialModel(nn.Module):
+#     def _init_(self, pretrained_model='ProsusAI/finbert', num_aspects=4):
+#         super(MultitaskFinancialModel, self)._init_()
+#         self.bert = AutoModel.from_pretrained(pretrained_model)
+#         hidden_size = self.bert.config.hidden_size
+        
+#         # Aspect classification head
+#         self.aspect_classifier = nn.Sequential(
+#             nn.Dropout(0.1),
+#             nn.Linear(hidden_size, hidden_size),
+#             nn.ReLU(),
+#             nn.Linear(hidden_size, num_aspects)
+#         )
+        
+#         # Sentiment regression head
+#         self.sentiment_regressor = nn.Sequential(
+#             nn.Dropout(0.1),
+#             nn.Linear(hidden_size, hidden_size),
+#             nn.ReLU(),
+#             nn.Linear(hidden_size, 1),
+#             nn.Tanh()  # Output between -1 and 1
+#         )
+    
+#     def forward(self, input_ids, attention_mask):
+#         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+#         pooled_output = outputs.last_hidden_state[:, 0, :]  # Use [CLS] token
+        
+#         aspect_logits = self.aspect_classifier(pooled_output)
+#         sentiment_score = self.sentiment_regressor(pooled_output)
+        
+#         return aspect_logits, sentiment_score
+
+# class FinancialDataset(Dataset):
+#     def _init_(self, texts, aspects, sentiments, tokenizer, max_length=128):
+#         self.texts = texts
+#         self.aspects = aspects
+#         self.sentiments = sentiments
+#         self.tokenizer = tokenizer
+#         self.max_length = max_length
+
+#     def _len_(self):
+#         return len(self.texts)
+
+#     def _getitem_(self, idx):
+#         text = str(self.texts[idx])
+        
+#         encoding = self.tokenizer(
+#             text,
+#             add_special_tokens=True,
+#             max_length=self.max_length,
+#             padding='max_length',
+#             truncation=True,
+#             return_tensors='pt'
+#         )
+
+#         return {
+#             'input_ids': encoding['input_ids'].flatten(),
+#             'attention_mask': encoding['attention_mask'].flatten(),
+#             'aspect_label': torch.tensor(self.aspects[idx], dtype=torch.long),
+#             'sentiment_score': torch.tensor(self.sentiments[idx], dtype=torch.float)
+#         }
+
+# def train_multitask_model(model, train_loader, test_loader, epochs=10):
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     print(f"Using device: {device}")
+    
+#     model.to(device)
+#     optimizer = AdamW(model.parameters(), lr=2e-5)
+    
+#     # Loss functions
+#     aspect_criterion = nn.CrossEntropyLoss()
+#     sentiment_criterion = nn.MSELoss()
+    
+#     for epoch in range(epochs):
+#         model.train()
+#         total_loss = 0
+#         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch + 1}')
+        
+#         for batch in progress_bar:
+#             input_ids = batch['input_ids'].to(device)
+#             attention_mask = batch['attention_mask'].to(device)
+#             aspect_labels = batch['aspect_label'].to(device)
+#             sentiment_scores = batch['sentiment_score'].to(device)
+            
+#             optimizer.zero_grad()
+            
+#             # Forward pass
+#             aspect_logits, predicted_sentiment = model(input_ids, attention_mask)
+            
+#             # Calculate losses
+#             aspect_loss = aspect_criterion(aspect_logits, aspect_labels)
+#             sentiment_loss = sentiment_criterion(predicted_sentiment.squeeze(), sentiment_scores)
+            
+#             # Combined loss (you can adjust the weights)
+#             loss = aspect_loss + sentiment_loss
+            
+#             loss.backward()
+#             optimizer.step()
+            
+#             total_loss += loss.item()
+#             progress_bar.set_postfix({'loss': total_loss / len(train_loader)})
+        
+#         print(f"\nEpoch {epoch + 1} average loss: {total_loss / len(train_loader)}")
+#         evaluate_multitask_model(model, test_loader, device)
+
+# def evaluate_multitask_model(model, test_loader, device):
+#     model.eval()
+#     aspect_predictions = []
+#     sentiment_predictions = []
+#     aspect_true = []
+#     sentiment_true = []
+    
+#     with torch.no_grad():
+#         for batch in test_loader:
+#             input_ids = batch['input_ids'].to(device)
+#             attention_mask = batch['attention_mask'].to(device)
+            
+#             aspect_logits, predicted_sentiment = model(input_ids, attention_mask)
+            
+#             # Get predictions
+#             _, aspect_pred = torch.max(aspect_logits, 1)
+            
+#             aspect_predictions.extend(aspect_pred.cpu().numpy())
+#             sentiment_predictions.extend(predicted_sentiment.cpu().squeeze().numpy())
+#             aspect_true.extend(batch['aspect_label'].cpu().numpy())
+#             sentiment_true.extend(batch['sentiment_score'].cpu().numpy())
+    
+#     # Print metrics
+#     print("\nAspect Classification Report:")
+#     print(classification_report(aspect_true, aspect_predictions))
+    
+#     print("\nSentiment Regression Metrics:")
+#     mse = mean_squared_error(sentiment_true, sentiment_predictions)
+#     # mse=((sentiment_true-sentiment_predictions)**2).mean(axis)
+#     r2 = r2_score(sentiment_true, sentiment_predictions)
+#     print(f"Mean Squared Error: {mse:.4f}")
+#     print(f"R² Score: {r2:.4f}")
+
+# def predict_aspect_and_sentiment(text, model, tokenizer, aspect_encoder):
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     model.to(device)
+#     model.eval()
+    
+#     encoding = tokenizer(
+#         text,
+#         add_special_tokens=True,
+#         max_length=128,
+#         padding='max_length',
+#         truncation=True,
+#         return_tensors='pt'
+#     )
+    
+#     input_ids = encoding['input_ids'].to(device)
+#     attention_mask = encoding['attention_mask'].to(device)
+    
+#     with torch.no_grad():
+#         aspect_logits, sentiment_score = model(input_ids, attention_mask)
+#         aspect_pred = torch.argmax(aspect_logits, dim=1)
+        
+#     predicted_aspect = aspect_encoder.inverse_transform(aspect_pred.cpu().numpy())[0]
+#     predicted_sentiment = sentiment_score.cpu().numpy()[0][0]
+    
+#     return predicted_aspect, predicted_sentiment
+
+# # Initialize and train the model
+# tokenizer = AutoTokenizer.from_pretrained('ProsusAI/finbert')
+# model = MultitaskFinancialModel(num_aspects=len(aspect_encoder.classes_))
+
+# # Create datasets with sentiment scores
+# train_dataset = FinancialDataset(
+#     X_train.values,
+#     y_aspect_train.values,
+#     y_sentiment_train.values,
+#     tokenizer
+# )
+
+# test_dataset = FinancialDataset(
+#     X_test.values,
+#     y_aspect_test.values,
+#     y_sentiment_test.values,
+#     tokenizer
+# )
+
+# # Create data loaders
+# train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+# test_loader = DataLoader(test_dataset, batch_size=16)
+
+# # %% [code] {"execution":{"iopub.status.busy":"2024-11-25T03:42:07.967395Z","iopub.execute_input":"2024-11-25T03:42:07.967656Z","iopub.status.idle":"2024-11-25T03:45:11.151725Z","shell.execute_reply.started":"2024-11-25T03:42:07.967631Z","shell.execute_reply":"2024-11-25T03:45:11.150815Z"}}
+# # Train the model
+# train_multitask_model(model, train_loader, test_loader)
+
+# # Make predictions
+# text = "Tesla reports record quarterly deliveries"
+# aspect, sentiment = predict_aspect_and_sentiment(text, model, tokenizer, aspect_encoder)
+# print(f"Text: {text}")
+# print(f"Predicted aspect: {aspect}")
+# print(f"Predicted sentiment score: {sentiment:.2f}")
+
+# %% [markdown]
+# Attempted Multitask Model for Aspect and Sentiment Prediction
+# 
+# Model Overview
+# Objective:
+# Develop a multitask model capable of:
+# Predicting the main aspect of a financial text.
+# Regressing the sentiment score to quantify sentiment intensity.
+# Architecture:
+# Pretrained Base Model: ProsusAI/finbert (fine-tuned for financial domain text).
+# Aspect Classification Head:
+# A fully connected neural network with ReLU activation for multi-class classification.
+# Sentiment Regression Head:
+# A fully connected neural network with Tanh activation to predict sentiment scores between -1 and 1.
+# Dataset:
+# Input: Textual data from the financial dataset.
+# Outputs:
+# Aspect labels: Encoded as integers for classification.
+# Sentiment scores: Real values for regression.
+# Training Process:
+# Used separate CrossEntropyLoss for aspect classification and MSELoss for sentiment regression.
+# Combined loss function for joint optimization.
+# Optimized with AdamW optimizer and a learning rate of 2e-5.
+# Results and Challenges
+# Performance Metrics:
+# Aspect Classification:
+# Metrics: Precision, Recall, F1-Score (via classification report).
+# Sentiment Regression:
+# Metrics: Mean Squared Error (MSE) and R score.
+# Observed Issues:
+# The multitask nature of the model resulted in high error rates:
+# Sentiment Regression: Poor R scores, indicating the model failed to capture the relationship between inputs and sentiment scores.
+# Aspect Classification: Subpar precision and recall due to overfitting or lack of sufficient signal for aspect differentiation.
+# Combined training might have led to conflicting gradients, degrading the performance of both tasks.
+# 
+#
